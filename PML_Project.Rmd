@@ -1,0 +1,305 @@
+---
+title: "Practical Machine Learning"
+author: "Mtoti"
+date: "April 03 2016"
+output: html_document
+---
+##**Problem Description**
+###Informal Description
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+###Formal Description
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. Use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases. 
+
+###Provided Data
+The training data for this project are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment. 
+
+##**Exploratory Data Analysis and Data Preparation**
+###Loading required libraries
+```{r Load Required Libraries, warnings=FALSE, message=FALSE}
+# Required libraries
+suppressMessages(library(caret));suppressMessages(library(rattle));library(ROCR)
+suppressMessages(library(ggplot2));suppressMessages(library(rpart.plot));
+suppressMessages(library(randomForest));suppressMessages(library(gridExtra));
+suppressMessages(library(gbm));suppressMessages(library(splines));
+suppressMessages(library(plyr));suppressMessages(library(formattable));
+suppressMessages(library(parallel));suppressMessages(library(doParallel))
+```
+
+###Loading, Preprocessing and Feature Selection
+```{r Load and Preprocess Data, warnings=FALSE, message=FALSE}
+if (!file.exists("pml-training.csv")) {
+    # Download the file if it is not represented in the working directory
+  fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  download.file(fileUrl, destfile = "pml-training.csv")
+}
+
+if (!file.exists("pml-testing.csv")) {
+    # Download the file if it is not represented in the working directory
+  fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  download.file(fileUrl,destfile = "pml-testing.csv")
+}
+
+TrainingData <- read.csv("pml-training.csv")
+TestingData <- read.csv("pml-testing.csv")
+
+#Table Plot Function
+plotTable <- function(pdf, choice){
+if(choice=="Best.Model"){
+formattable(pdf, list( 
+  Algorithm = formatter("span",
+    style = x ~ vmap(x, A = style(color = "green", font.weight = "bold"), NA)),
+  Accuracy = formatter("span",
+    style = x ~ style(color = ifelse(rank(-x) <= 1, "green", "gray"),font.weight = "bold")), 
+  OOB.error.rate = formatter("span",
+    style = x ~ style(color = ifelse(rank(-x) <= 1, "green", "gray"),font.weight = "bold")),
+  Best.Model = formatter("span",
+    style = x ~ style(color = ifelse(rank(-x) <= 1, "green", "red"),font.weight = "bold"),
+    x ~ icontext(ifelse(rank(-x) <= 1, "ok", "remove"), ifelse(rank(-x) <= 1, "Yes", "No")))
+
+),  align = c("l","l","l","l","c"))
+  
+  } else{
+formattable(pdf, list( 
+  Algorithm = formatter("span",
+    style = x ~ vmap(x, A = style(color = "green", font.weight = "bold"), NA)),
+  Accuracy = formatter("span",
+    style = x ~ style(color = ifelse(rank(-x) <= 1, "green", "gray"),font.weight = "bold")), 
+  OOB.error.rate = formatter("span",
+    style = x ~ style(color = ifelse(rank(-x) <= 1, "green", "gray"),font.weight = "bold")),
+  Final.Model = formatter("span",
+    style = x ~ style(color = ifelse(rank(-x) <= 1, "green", "red"),font.weight = "bold"),
+    x ~ icontext(ifelse(rank(-x) <= 1, "ok", "remove"), ifelse(rank(-x) <= 1, "Yes", "No")))
+
+),  align = c("l","l","l","l","c"))
+ } 
+}
+```
+
+####Are there missing or corrupted values? If any remove them.
+```{r columns Missing values, warnings=FALSE,message=FALSE,comment="",results='asis'}
+isMissing <- sapply(TrainingData, function (x) any(is.na(x) | x == ""))
+# remove missing values
+notMissing <- isMissing[isMissing==FALSE] # logical
+notMissingChr <- c(names(notMissing)) # character vector
+notMissingData <- TrainingData[, notMissingChr] # subset that have all values
+
+```
+
+There are `r length(names(isMissing)[isMissing==TRUE])` columns with missing values, and `r length(names(isMissing)[isMissing==FALSE])` columns that do not have any missing values in `training dataset`.
+
+####What data types are the attributes?
+```{r Data types, warnings=FALSE,message=FALSE,results='hold'}
+str(notMissingData[, 1:10])
+```
+
+From the structure of the data, we can see that the first 7 variables 
+<span style="color:red">`X`</span>, 
+<span style="color:red">`user_name`</span>, 
+<span style="color:red">`raw_timestamp_part_1`</span>, 
+<span style="color:red">`raw_timestamp_part_2`</span>, 
+<span style="color:red">`cvtd_timestamp`</span>, 
+<span style="color:red">`new_window`</span>, 
+<span style="color:red">`num_window`</span> are simply administrative parameters that will not help us predict the activity the subjects are performing. As a result, we are going to remove those 7 variables out.
+
+#### Candidate Predictor Variables
+Subset the primary training dataset to include only the **predictor candidates**.
+```{r Remove Columns Missing values, warnings=FALSE, message=FALSE,comment="",results='asis'}
+# change found values to FALSE cause they not predictors
+isPredictor <- !grepl("^X|name|timestamp|window", names(notMissing))
+predCandidates <- names(notMissing)[isPredictor] # subset predictor names
+
+```
+
+There are `r length(predCandidates)-1` predictor candidates varibles at this point in time.
+
+####Identifying Correlated Candidate Predictors
+Since  the goal in selecting models is to avoid overfitting on training data and minimize error on test data. When more predictors used, the model is more likely to overfit the training data. So will remove highly correlated predictor from our **`predictor candidates`**.
+```{r Remove Correlated Predictors, warnings=FALSE, message=FALSE}
+predCandData <- TrainingData[, predCandidates]
+# calculate correlation matrix
+correlationMatrix <- cor(predCandData[,1:length(predCandData)-1])
+# find attributes that are highly corrected (ideally >0.75)
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.90)
+#sort
+highlyCorrelated <- sort(highlyCorrelated)
+```
+
+There are `r length(highlyCorrelated)` highly correlated variables out of `r length(predCandData)-1` predictor candidates varibles at this point in time.
+
+####Final Candidate Predictors
+```{r Final Candidate Predictors, warnings=FALSE, message=FALSE,comment="",results='asis'}
+reducedPred <- c(names(predCandData[,-c(highlyCorrelated)]))
+```
+
+After removing highly correlated variable we have `r length(reducedPred)-1` final candidate predictor variables.
+
+##**Evaluate Algorithms**
+###Splice Training Data
+We partition the cleaned training data in order to create a training set and a test set. Considering the variable "classe" as an outcome, We assume that the training set and the test set respectively correspond to 70% and 30% of the total training data.
+
+```{r Splice Training Data, warnings=FALSE, message=FALSE}
+seed <- as.numeric(as.Date("2016-04-08"))
+set.seed(seed)
+predCandData <- TrainingData[, reducedPred] #Entire cleaned dataset
+inTrain <- createDataPartition(y=predCandData$classe,p=0.7,list=FALSE)
+training <- predCandData[inTrain,] # random subsample
+crossvalid <- predCandData[-inTrain,] #random OOB subsample
+
+```
+
+###Check for near zero variance.
+```{r Near Zero Variance, warnings=FALSE, message=FALSE, comment="", results='asis'}
+nzv <- nearZeroVar(training, saveMetrics=TRUE)
+if (any(nzv$nzv)) nzv else msg<-"no variables with near zero variance"
+```
+
+There are <span style="color:red">`r msg`</span> in the training dataset.
+
+###Train the Candidate Models
+Next we fit three prediction models using the training set, apply different models on the test set and compare these models in terms of Accuracy and out of Sample error. The models that we choose are 
+<span style="color:red">`Decision Tree`</span>,
+<span style="color:red">`Random Forest`</span>, and
+<span style="color:red">`Boosting`</span>.
+
+Start out by setting up the parallel clusters
+```{r Start Clusters, warnings=FALSE, message=FALSE}
+cl <- makeCluster(detectCores() - 1)
+registerDoParallel(cl)
+```
+
+```{r Decision Tree, warnings=FALSE, message=FALSE}
+# Decision Tree
+DTreemodelsys<-system.time(DTreemodel <- train(classe~.,data=training,preProc=c('center', 'scale'), method="rpart"))
+# Random Forest
+RFmodelsys<-system.time(RFmodel <- randomForest(classe~., data=training,preProc=c('center', 'scale'), importance=TRUE))
+# Boosting
+# run the generalized boosted regression model
+BfitControl <- trainControl(method="repeatedcv", number=3, repeats=3)
+# run the generalized boosted regression model with trees
+Boostmodelsys<-system.time(Boostmodel <- train(classe~.,data=training,preProc=c('center', 'scale'),method="gbm",trControl =BfitControl, verbose=FALSE))
+```
+
+###Test the Candidate Models
+Now that we've trained the models, we can use it to score the `test set` and see how well your model predicts on unseen data.
+```{r Test the Candidate Models, warnings=FALSE, message=FALSE}
+# Decision Tree model predict on testing data set
+DTreepredict <- predict(DTreemodel,newdata=crossvalid)
+# Random Forest model predict on testing data set
+RFpredict <- predict(RFmodel,newdata=crossvalid)
+# Boosting model predict on testing data set
+Boostpredict <- predict(Boostmodel,newdata=crossvalid)
+```
+
+Stop the clusters
+```{r Stop Cluster, warnings=FALSE, message=FALSE, results="hide"}
+stopCluster(cl)
+gc()
+```
+
+###Evaluate candidate Models
+```{r Evaluate Models, warnings=FALSE, message=FALSE}
+#show predicted result for all three models
+DTreecm <- confusionMatrix(crossvalid$classe,DTreepredict)
+DTreeAccuracy <- round(DTreecm$overall[1],4)
+DTreeOOB <- round(sum(DTreemodel$err.rate)*2,0)
+RFcm <- confusionMatrix(crossvalid$classe,RFpredict)
+RFAccuracy <- round(RFcm$overall[1],4)
+RFOOB <- sprintf("%.4f",(sum(RFmodel$err.rate)*2)/10000)
+Boostcm <- confusionMatrix(crossvalid$classe,Boostpredict)
+BoostAccuracy <- round(Boostcm$overall[1],4)
+BoostOOB <- round(sum(Boostmodel$err.rate)*2,0)
+
+df <- data.frame(
+      Algorithm = c("Decision Tree", "Random Forest","Boosting"),
+      Time.to.Train = c(as.numeric(DTreemodelsys)[3],as.numeric(RFmodelsys)[3],as.numeric(Boostmodelsys)[3]),
+      Accuracy = percent(c(DTreeAccuracy,RFAccuracy,BoostAccuracy),digits=1L), 
+      OOB.error.rate = percent(c("",RFOOB,""),digits=2L),
+      Best.Model = percent(c(DTreeAccuracy,RFAccuracy,BoostAccuracy),digits=1L))
+```
+
+<span style="color:red">`True Positive(TP)`</span> and 
+<span style="color:red">`False Positive(FP)`</span>; 
+<span style="color:red">`True Negative(TN)`</span> and 
+<span style="color:red">`False Negative(FN)`</span>
+
+Sensitivity<span style="color:red">`[TP/(TP+FN)]`</span> - Ratio of items predicted as Positives which are actually positive versus total number of Positive items.
+
+Specificity<span style="color:red">`[TN/(TN+FP)]`</span> - Ratio of items predicted as Negative which are actually negative versus total number of Negative items.
+
+Increase in Sensitivity leads to increase in TPs and decrease in FNs. Similarly increase in Specificity means increase in TNs and decrease in FPs.
+
+So, Sensitivity and Specificity are good enough to measure a Machine Learning Model. We plot out both specificity versus sensitivity for all four models.
+```{r Comparison, fig.width=20, fig.height=10,dpi=72, warning=FALSE}
+# compare the sensitivity and specificity btw random forest and boosting method
+par(mfrow=c(2,2))
+plot(DTreecm$byClass, main="Decision Tree", xlim=c(0.4, 1.005), ylim=c(0.7,1))
+text(DTreecm$byClass[,1]+0.04, DTreecm$byClass[,2], labels=LETTERS[1:5], cex= 0.7)
+plot(RFcm$byClass, main="Random Forest", xlim=c(0.96, 1.005))
+text(RFcm$byClass[,1]+0.003, RFcm$byClass[,2], labels=LETTERS[1:5], cex= 0.7)
+plot(Boostcm$byClass, main="Boosting", xlim=c(0.93, 1.001))
+text(Boostcm$byClass[,1]+0.005, Boostcm$byClass[,2], labels=LETTERS[1:5], cex= 0.7)
+```
+
+The figures show random forest is better in both aspects. Therefore, we select random forest as our final prediction model.
+
+```{r Final Candidate Model,echo=FALSE,message=FALSE}
+plotTable(df, "Best.Model")
+```
+
+As we can see **`randomForest`** is the better performing algorithm with **``r percent(RFOOB,digits=2L)``** out-of-bag (OOB) error rate. When the model is applied to the validation set for cross validation, the model achieved an accuracy of **``r percent(RFAccuracy,digits=1L)``**, which indicates the actual error rate is **``r 1- percent(RFAccuracy,digits=1L)``**.
+
+As a result we select the random forest-based model apply it to 20 use cases in the testing data in order to predict how well 20 exercises are being performed (classe variable).
+
+###Evaluate Final Model
+```{r Evaluate Final Model, warnings=FALSE, message=FALSE,comment="",results='asis'}
+threshold <- quantile(RFmodel$importance[,1], 0.3)
+filters <- RFmodel$importance[,1] >= threshold
+FinalRFmodelPred<-names(filters[filters==TRUE])
+FinalRFmodelPred <- c(FinalRFmodelPred, "classe")
+seed <- as.numeric(as.Date("2016-04-08"))
+set.seed(seed)
+FinalpredData <- TrainingData[, FinalRFmodelPred]
+inTrain <- createDataPartition(y=FinalpredData$classe,p=0.7,list=FALSE)
+Finaltraining <- FinalpredData[inTrain,]
+Finalcrossvalid <- FinalpredData[-inTrain,]
+# Random Forest
+FinalRFmodelsys<-system.time(FinalRFmodel <- randomForest(classe~.,data=Finaltraining,preProc=c('center', 'scale'),importance=T))
+# Random Forest model predict on testing data set
+FinalRFpredict <- predict(FinalRFmodel,newdata=Finalcrossvalid)
+FinalRFcm <- confusionMatrix(Finalcrossvalid$classe,FinalRFpredict)
+FinalRFAccuracy <- round(FinalRFcm$overall[1],4)
+FinalRFOOB <- sprintf("%.4f",(sum(FinalRFmodel$err.rate)*2)/10000)
+
+RFdf <- data.frame(
+                  Algorithm = "Random Forest",
+                  Time.to.Train = as.numeric(FinalRFmodelsys)[3],
+                  Accuracy = percent(as.numeric(FinalRFAccuracy),digits=1L), 
+                  OOB.error.rate = percent(as.numeric(FinalRFOOB),digits=2L),
+                  Final.Model = percent(as.numeric(FinalRFAccuracy),digits=1L))
+
+#writers_df<-dataframe(Algorithm,Time.to.Train,Accuracy, OOB.error.rate )
+plotTable(RFdf, "Final.Model")
+```
+
+####Final Predictors
+As you can see, we manage to reduce the number of predictors from `r length(reducedPred)-1` to `r length(FinalRFmodelPred)-1` final predictors with affecting the accuracy or OOB-rate.
+
+## **Prediction**
+We apply the final random forest model to the testing data in order to predict the "classe" outcome of each of the 20 considered use cases.
+
+```{r Final Prediction,message=FALSE}
+# apply random forest model to use cases
+results <- predict(FinalRFmodel,TestingData)
+
+```
+
+
